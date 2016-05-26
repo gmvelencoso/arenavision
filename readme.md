@@ -1,6 +1,8 @@
 Arenavision Sopcast Launcher
 ============================
 
+![travis](https://travis-ci.org/gmvelencoso/arenavision.svg)
+
 Launch with `arenavision_sopcast.py` and follow onscreen instructions.
 
 The command accepts 1 argument to filter, i.e:
