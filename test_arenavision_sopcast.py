@@ -60,7 +60,7 @@ def option_chooser():
 # test Item class
 def mock_item_data():
     # return arenavision_sopcast.Item([datetime.datetime(2016, 01, 01, 00, 00), "FUTBOL", "BARCA - MADRID", "LA LIGA", ["av21", "av22"]])
-    return [datetime.datetime(2016, 01, 01, 00, 00), "FUTBOL", "BARCA - MADRID", "LA LIGA", ["av21", "av22"]]
+    return [datetime.datetime(2016, 1, 1, 0, 0), "FUTBOL", "BARCA - MADRID", "LA LIGA", ["av21", "av22"]]
 
 
 def test_item_gettime():

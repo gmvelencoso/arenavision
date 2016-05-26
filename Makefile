@@ -1,10 +1,18 @@
-PROGRAM := /home/gerard/.virtualenvs/arenavision/bin/python arenavision_sopcast.py
+SHELL:= /bin/bash
+PROGRAM:= ~/.virtualenvs/arenavision/bin/python arenavision_sopcast.py
 
-.PHONY: test-acceptance
+VENV:= source .virtualenv/bin/activate &&
 
-all: test-acceptance
-	@echo "No unit test yet..."
+.PHONY: virtualenv
 
-test-acceptance:
-	$(PROGRAM) thisstringwillnotbefoundanywayintheputput || true
-	
+help:
+	@echo "make virtualenv -- create install dependencies"
+	@echo "make test -- execute unit tests"
+
+virtualenv:
+	virtualenv .virtualenv
+	$(VENV) pip install -r requirements.txt
+	$(VENV) pip install -r requirements-dev.txt
+
+test: virtualenv
+	$(VENV) py.test
