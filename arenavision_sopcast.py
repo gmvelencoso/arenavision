@@ -8,11 +8,11 @@ from lxml import html
 import subprocess
 import re
 import sys
+import argparse
 
 BASE_URL = "http://arenavision.in/"
 
 SOP_PORT = "8908"
-
 
 HEADERS = {
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -28,7 +28,6 @@ CHAN_EXP = "/(AV[0-9]{1,2})"
 SPORT_EXP = "CET ([^:]+):"
 DESC_EXP = "CET {sport}: (.*)/{join_channels}"
 
-VLC_LOGFILE = "/var/log/output_vlc.log"
 
 class Item(object):
     def __init__(self, data):
@@ -38,33 +37,41 @@ class Item(object):
     def __str__(self):
         return str((self.time, self.sport, self.match, self.category, self.channels, self.soplinks))
 
-    def matches(self, args):
+    def gettime(self):
+        return self.time.strftime(DATEFORMAT)
+
+    def header(self):
+        return "\n".join([self.sport + " - " + self.category, self.gettime() + " " + self.match])
+
+    def tolist(self):
+        return [
+            self.gettime(),
+            self.sport.decode("utf8"),
+            self.category.decode("utf8"),
+            self.match.decode("utf8")
+        ]
+
+    def matches(self, keywords):
         haystack = str(self).lower()
-        return any(arg for arg in args if arg in haystack)
+        return any(keyword for keyword in keywords if keyword in haystack)
 
 
 def parse_schedule_row(row):
-    # var initialization
-    time = sport = match = category = channels = None
-
     row = row.encode("utf8").strip()
     try:
         time = row[:14]
         time = datetime.strptime(time, DATEFORMAT)
     except Exception, e:
-        print e
         return None
 
     try:                
         sport = re.findall(SPORT_EXP, row)[0]
     except Exception, e:
-        print e    
         return None
 
     try:    
         channels = re.findall(CHAN_EXP, row)
     except Exception, e:
-        print e
         return None
 
     try:
@@ -73,15 +80,18 @@ def parse_schedule_row(row):
         category = re.findall("\(([^\(]+)\)", match)[0]
         match = match.replace("({0})".format(category), "").strip()
     except Exception, e:
-        print e
         return None
 
     return time, sport, match, category, channels
 
 
 def get_page(url):
-    req = requests.get(url, headers=HEADERS)
-    return req.content
+    try:
+        req = requests.get(url, headers=HEADERS)
+        return req.content
+    except requests.exceptions.ConnectionError:
+        print "Could not connect with host. Please retry later. Sorry."
+        raise KeyboardInterrupt
 
 
 def get_schedule():
@@ -92,8 +102,8 @@ def get_schedule():
     for match in tree.xpath('//div[contains(@class, "field-item")]/p[2]/text()'):
         data = parse_schedule_row(match)
         if data:
-        	item = Item(parse_schedule_row(match))
-        	items.append(item)
+            item = Item(parse_schedule_row(match))
+            items.append(item)
 
     return items
 
@@ -109,53 +119,26 @@ def crawl_sopcast_links(item):
                 item.soplinks.append(link[0])
 
 
-def show_available_matches(items):
-    table = []
-    for i, item in enumerate(items, start=1):
-        table.append([
-            i,
-            datetime.strftime(item.time, DATEFORMAT),
-            item.sport.decode("utf8"),
-            item.category.decode("utf8"),
-            item.match.decode("utf8")
-        ])
-    print tabulate(table)
-
-
 def clear_screen():
     sys.stdout.write("\033[2J\033[;H")
 
 
 def print_buffering(value):
-    sys.stderr.write("\rBuffering... {0}%".format(value))
+    sys.stdout.write("\rBuffering... {0}%".format(value))
 
 
 def show_match_options(match):
-    while True:
-        clear_screen()
 
-        print match.match
-        print match.time.strftime("%d-%m-%Y %H:%M")
-        for i, link in enumerate(match.soplinks, start=1):
-            print "  {0} - {1}".format(i, link)
+    choose = "Choose a sopcast channel to start streaming"
 
-        ch = raw_input("Choose a sopcast channel to start streaming: ")
-        
-        try:
-            soplink = match.soplinks[int(ch) - 1]
-        except (IndexError, ValueError) as e:
-            print "Type a valid channel: " + str(range(len(match.soplinks)))
-            sleep(2)
-            continue
-        
-        start_streaming(match.soplinks[int(ch) - 1])
+    option = option_chooser(header=match.header(), choose=choose, options=[[link,] for link in match.soplinks])
+
+    start_streaming(match.soplinks[option])
     
-        
 
 def start_streaming(soplink):
     print "Start streaming channel: " + soplink
 
-    vlcoutput = open(VLC_LOGFILE, 'a+')
     vlcrunning = False
     sopprocess = None
 
@@ -171,8 +154,8 @@ def start_streaming(soplink):
             if "nblockAvailable" in line:
                 buff = line.split("nblockAvailable=")[-1]
                 print_buffering(buff.strip())
-                if int(buff) > 30 and not vlcrunning:
-                    subprocess.Popen(vlccmd, stdout=vlcoutput, stderr=vlcoutput)
+                if not vlcrunning and int(buff) > 30:
+                    subprocess.Popen(vlccmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                     vlcrunning = True
         sopprocess.terminate()
         print "Bye!"
@@ -183,14 +166,18 @@ def start_streaming(soplink):
 
 
 def main(args):
+    print "Requesting schedules from {0}".format(BASE_URL + "agenda")
     items = get_schedule()
 
-    timelimit = datetime.now() - timedelta(hours=2)
-    items = filter(lambda x: x.time > timelimit, items)
-    items = sorted(items, key=lambda x: x.sport, reverse=False)
+    # we want to filter matches already finished (past) or too late to start streaming (future)
+    past = datetime.now() - timedelta(hours=2)
+    future = datetime.now() + timedelta(hours=24)
+    items = filter(lambda x: past < x.time < future, items)
+    items = sorted(items, key=lambda x: x.time, reverse=False)
 
     if args:
-        args = (arg.lower() for arg in args)
+        # args cannot be a generator, as it will loop each item, and will be consumed on first Item.matches call
+        args = [arg.lower() for arg in args]
         items = [item for item in items if item.matches(args)]
 
     if not items:
@@ -200,33 +187,151 @@ def main(args):
     match = None
 
     while not match:
-        # clears the screen 
-        clear_screen()
-        show_available_matches(items)
-        ch = raw_input("Choose a channel or type a sport to filter: ")
-        if not ch.isdigit():
-            filtered = [item for item in items if item.matches((ch.lower(),))]
+        if len(items) == 1:
+            match = items[0]
+            print "Only one match: {0}".format(" ".join(match.tolist()).encode("utf-8"))
+            sleep(3)
+            break
+
+        choose_string = "Choose a channel or type a sport to filter"
+
+        items_list = [item.tolist() for item in items]
+        input = option_chooser(options=items_list, choose=choose_string, allowfilter=True)
+        if type(input) is int:
+            match = items[input]
+        else:
+            # this is a keyword to filter
+            filtered = [item for item in items if item.matches((input.lower(),))]
             if not filtered:
                 print "No results to show, please check your filter"
                 sleep(2)
             else:
                 items = filtered
-        else:
-            try:
-                match = items[int(ch) - 1] # enumerate starts in 1               
-            except IndexError as ie:
-                print "Type a valid index channel"
-                sleep(2)
 
     crawl_sopcast_links(match)
     show_match_options(match)
     return 0
 
 
+def get_indexed_options(items, start=0):
+    """
+    returns a enumerated index to item (list) itself
+    """
+    result = []
+    for i, item in enumerate(items, start=start):
+        assert type(item) is list
+        result.append([i] + item)
+    return result
+
+
+def parse_arguments(args):
+    parser = argparse.ArgumentParser(description='Searchs for sports events in http://arenavision.in and starts a sopcast stream')
+    parser.add_argument('filter', nargs='*', help='Word to start filtering the results')
+    return parser.parse_args(args)
+
+
+def option_chooser(header="", options=None, choose="Enter a number", allowfilter=False):
+    """
+    asks for a user input (index) based on a list. 0 for exit.
+    Returns a options item index or a filter string if enabled
+    """
+    input = None
+
+    if not options:
+        print "No possible options to show."
+        raise KeyboardInterrupt()
+
+    # appends the index to the first element of each option
+    options = get_indexed_options(options, start=1)
+
+    while not input:
+        clear_screen()
+        if header:
+            print header
+
+        print tabulate(options)
+
+        input = raw_input(choose + " (0 to exit): ")
+        # TODO: externalise logic
+        if not input.isdigit():
+            if allowfilter:
+                return input
+            else:
+                print "Type a valid item index: "
+                input = None
+                sleep(3)
+        else:
+            if input == "0":
+                raise KeyboardInterrupt()
+
+            try:
+                _ = options[int(input) - 1]  # enumerate starts in 1
+                # as its a valid index, let's return it:
+                return int(input) - 1
+            except IndexError as ie:
+                print "Type a valid index channel"
+                input = None
+                sleep(2)
+    return input
+
+
 if __name__ == "__main__":
     try:
-        exit(main(sys.argv[1:]))
+        args = parse_arguments(sys.argv[1:])
+        exit(main(args.filter))
     except KeyboardInterrupt as e:
         print "Good bye!"
-        exit(0)
-    
+
+
+
+
+# TODO: catch exception loading page
+"""
+Traceback (most recent call last):
+  File "./arenavision_sopcast.py", line 270, in <module>
+    exit(main(args.filter))
+  File "./arenavision_sopcast.py", line 166, in main
+    items = get_schedule()
+  File "./arenavision_sopcast.py", line 95, in get_schedule
+    page = get_page(BASE_URL + "agenda")
+  File "./arenavision_sopcast.py", line 90, in get_page
+    req = requests.get(url, headers=HEADERS)
+  File "/home/gerard/.virtualenvs/arenavision/local/lib/python2.7/site-packages/requests/api.py", line 71, in get
+    return request('get', url, params=params, **kwargs)
+  File "/home/gerard/.virtualenvs/arenavision/local/lib/python2.7/site-packages/requests/api.py", line 57, in request
+    return session.request(method=method, url=url, **kwargs)
+  File "/home/gerard/.virtualenvs/arenavision/local/lib/python2.7/site-packages/requests/sessions.py", line 475, in request
+    resp = self.send(prep, **send_kwargs)
+  File "/home/gerard/.virtualenvs/arenavision/local/lib/python2.7/site-packages/requests/sessions.py", line 585, in send
+    r = adapter.send(request, **kwargs)
+  File "/home/gerard/.virtualenvs/arenavision/local/lib/python2.7/site-packages/requests/adapters.py", line 467, in send
+    raise ConnectionError(e, request=request)
+requests.exceptions.ConnectionError: HTTPConnectionPool(host='arenavision.in', port=80): Max retries exceeded with url: /agenda (Caused by NewConnectionError('<requests.packages.urllib3.connection.HTTPConnection object at 0x7f681c1e8a10>: Failed to establish a new connection: [Errno -2] Name or service not known',))
+
+"""
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
