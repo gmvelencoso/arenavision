@@ -1,4 +1,4 @@
-#!/home/gerard/.virtualenvs/arenavision/bin/python
+#!/home/gerard/dev/arenavision/.venv/bin/python
 
 import requests
 from time import sleep
@@ -22,7 +22,7 @@ HEADERS = {
     'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/49.0.2623.75 Safari/537.36'
 }
 
-DATEFORMAT = "%d/%m/%y %H:%M"
+DATEFORMAT = "%d/%m/%Y %H:%M"
 
 CHAN_EXP = "/(AV[0-9]{1,2})"
 SPORT_EXP = "CET ([^:]+):"
@@ -56,35 +56,6 @@ class Item(object):
         return any(keyword for keyword in keywords if keyword in haystack)
 
 
-def parse_schedule_row(row):
-    row = row.encode("utf8").strip()
-    try:
-        time = row[:14]
-        time = datetime.strptime(time, DATEFORMAT)
-    except Exception, e:
-        return None
-
-    try:                
-        sport = re.findall(SPORT_EXP, row)[0]
-    except Exception, e:
-        return None
-
-    try:    
-        channels = re.findall(CHAN_EXP, row)
-    except Exception, e:
-        return None
-
-    try:
-        exp = DESC_EXP.format(sport=sport, join_channels="/".join(channels)) 
-        match = re.findall(exp, row)[0]
-        category = re.findall("\(([^\(]+)\)", match)[0]
-        match = match.replace("({0})".format(category), "").strip()
-    except Exception, e:
-        return None
-
-    return time, sport, match, category, channels
-
-
 def get_page(url):
     try:
         req = requests.get(url, headers=HEADERS)
@@ -94,15 +65,28 @@ def get_page(url):
         raise KeyboardInterrupt
 
 
+def parse_schedule_row_node(row):
+    try:
+        rdate, rtime, rsport, rcat, rmatch, channels = map(lambda x: x.text.strip(), row)
+	if rdate and rtime:
+            time = datetime.strptime(rdate + " " + rtime.replace(" CET", ""), DATEFORMAT)
+	    channels = channels[:channels.find("[")] 
+	    channels = [ch.strip() for ch in channels.split("-") if 'S' in ch]
+	    if channels:
+		return time, rsport, rmatch, rcat, channels
+    except Exception as e:
+	print e
+    return None
+
+
 def get_schedule():
     page = get_page(BASE_URL + "agenda")
     tree = html.fromstring(page)
     items = []
-
-    for match in tree.xpath('//div[contains(@class, "field-item")]/p[2]/text()'):
-        data = parse_schedule_row(match)
+    for match in tree.xpath('//table//tr[td/@class="auto-style3"]'):
+	data = parse_schedule_row_node(match)
         if data:
-            item = Item(parse_schedule_row(match))
+            item = Item(data)
             items.append(item)
 
     return items
@@ -110,13 +94,11 @@ def get_schedule():
 
 def crawl_sopcast_links(item):
     for chan in item.channels:
-        chan = chan.lower().replace("av", "")
-        if int(chan) >= 20:
-            page = get_page(BASE_URL + "av" + chan)
-            tree = html.fromstring(page)
-            link = tree.xpath("//a[contains(@href, 'sop://')]/@href")
-            if link:
-                item.soplinks.append(link[0])
+        page = get_page(BASE_URL + "av" + chan.lower())
+        tree = html.fromstring(page)
+        link = tree.xpath("//a[contains(@href, 'sop://')]/@href")
+        if link:
+            item.soplinks.append(link[0])
 
 
 def clear_screen():
@@ -144,7 +126,7 @@ def start_streaming(soplink):
 
     try:
         sopcmd = ["sp-sc-auth", soplink, "3908", SOP_PORT]
-        vlccmd = ["vlc", "http://localhost:" + SOP_PORT + "/tv.asf"]
+        vlccmd = ["cvlc", "http://localhost:" + SOP_PORT + "/tv.asf"]
 
         sopprocess = subprocess.Popen(sopcmd, stdout=subprocess.PIPE)
         print "Wating for stream to buffer"
