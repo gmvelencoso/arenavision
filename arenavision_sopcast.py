@@ -28,6 +28,8 @@ CHAN_EXP = "/(AV[0-9]{1,2})"
 SPORT_EXP = "CET ([^:]+):"
 DESC_EXP = "CET {sport}: (.*)/{join_channels}"
 
+HAS_SOPCAST = False
+HAS_ACESTREAM = False
 
 class Item(object):
     def __init__(self, data):
@@ -65,30 +67,40 @@ def get_page(url):
         raise KeyboardInterrupt
 
 
+def clean_page(content):
+    return content.replace("<br />", "").replace("<br>", "").replace("\t", "").replace("\n", " ")
+
+
 def parse_schedule_row_node(row):
-    try:
+    try:        
         rdate, rtime, rsport, rcat, rmatch, channels = map(lambda x: x.text.strip(), row)
-	if rdate and rtime:
+        if rdate and rtime:
             time = datetime.strptime(rdate + " " + rtime.replace(" CET", ""), DATEFORMAT)
-	    channels = channels[:channels.find("[")] 
-	    channels = [ch.strip() for ch in channels.split("-") if 'S' in ch]
-	    if channels:
-		return time, rsport, rmatch, rcat, channels
+            
+            available_channels = re.findall("(S?[0-9]+)", channels)
+
+            if not HAS_SOPCAST:
+                available_channels = [x for x in available_channels if "S" not in x]
+
+            if not HAS_ACESTREAM:
+                available_channels = [x for x in available_channels if not x.isdigit()]
+            
+            if available_channels:
+                return time, rsport, rmatch, rcat, sorted(available_channels)
     except Exception as e:
-	print e
+        print e
     return None
 
 
 def get_schedule():
     page = get_page(BASE_URL + "agenda")
-    tree = html.fromstring(page)
+    tree = html.fromstring(clean_page(page))
     items = []
     for match in tree.xpath('//table//tr[td/@class="auto-style3"]'):
-	data = parse_schedule_row_node(match)
+        data = parse_schedule_row_node(match)
         if data:
             item = Item(data)
-            items.append(item)
-
+            items.append(item)    
     return items
 
 
@@ -129,8 +141,10 @@ def start_streaming(soplink):
         vlccmd = ["cvlc", "http://localhost:" + SOP_PORT + "/tv.asf"]
 
         sopprocess = subprocess.Popen(sopcmd, stdout=subprocess.PIPE)
+        
         print "Wating for stream to buffer"
         print_buffering(0)
+        
         while True:
             line = sopprocess.stdout.readline()
             if "nblockAvailable" in line:
@@ -212,6 +226,13 @@ def parse_arguments(args):
     return parser.parse_args(args)
 
 
+def startup():
+    # TODO: check if vlc is available
+    # TODO: check if sp-sc-auth or acestreamengine or both are available
+    global HAS_SOPCAST, HAS_ACESTREAM
+    HAS_SOPCAST = True
+    HAS_ACESTREAM = False
+
 def option_chooser(header="", options=None, choose="Enter a number", allowfilter=False):
     """
     asks for a user input (index) based on a list. 0 for exit.
@@ -259,61 +280,9 @@ def option_chooser(header="", options=None, choose="Enter a number", allowfilter
 
 if __name__ == "__main__":
     try:
+        startup()
         args = parse_arguments(sys.argv[1:])
         exit(main(args.filter))
     except KeyboardInterrupt as e:
         print "Good bye!"
-
-
-
-
-# TODO: catch exception loading page
-"""
-Traceback (most recent call last):
-  File "./arenavision_sopcast.py", line 270, in <module>
-    exit(main(args.filter))
-  File "./arenavision_sopcast.py", line 166, in main
-    items = get_schedule()
-  File "./arenavision_sopcast.py", line 95, in get_schedule
-    page = get_page(BASE_URL + "agenda")
-  File "./arenavision_sopcast.py", line 90, in get_page
-    req = requests.get(url, headers=HEADERS)
-  File "/home/gerard/.virtualenvs/arenavision/local/lib/python2.7/site-packages/requests/api.py", line 71, in get
-    return request('get', url, params=params, **kwargs)
-  File "/home/gerard/.virtualenvs/arenavision/local/lib/python2.7/site-packages/requests/api.py", line 57, in request
-    return session.request(method=method, url=url, **kwargs)
-  File "/home/gerard/.virtualenvs/arenavision/local/lib/python2.7/site-packages/requests/sessions.py", line 475, in request
-    resp = self.send(prep, **send_kwargs)
-  File "/home/gerard/.virtualenvs/arenavision/local/lib/python2.7/site-packages/requests/sessions.py", line 585, in send
-    r = adapter.send(request, **kwargs)
-  File "/home/gerard/.virtualenvs/arenavision/local/lib/python2.7/site-packages/requests/adapters.py", line 467, in send
-    raise ConnectionError(e, request=request)
-requests.exceptions.ConnectionError: HTTPConnectionPool(host='arenavision.in', port=80): Max retries exceeded with url: /agenda (Caused by NewConnectionError('<requests.packages.urllib3.connection.HTTPConnection object at 0x7f681c1e8a10>: Failed to establish a new connection: [Errno -2] Name or service not known',))
-
-"""
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
