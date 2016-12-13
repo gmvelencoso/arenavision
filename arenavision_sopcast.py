@@ -8,36 +8,33 @@ from lxml import html
 import subprocess
 import re
 import sys
+import os
 import argparse
 
-BASE_URL = "http://arenavision.in/"
 
-SOP_PORT = "8908"
+BASE_URL = "http://arenavision.in/"
+SCHEDULE_ENDPOINT = "schedule"
+
+ACESTREAMENGINE = "/usr/bin/acestreamengine"
+ACESTREAMPLAYER = "/usr/bin/acestreamplayer"
 
 HEADERS = {
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
     'Accept-Language': 'es,ca;q=0.8,en-US;q=0.6,en;q=0.4,:max-age=0',
     'Host': 'arenavision.in',
-    'Referer': 'http://arenavision.in/',
+    'Referer': BASE_URL,
     'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/49.0.2623.75 Safari/537.36'
 }
 
 DATEFORMAT = "%d/%m/%Y %H:%M"
 
-CHAN_EXP = "/(AV[0-9]{1,2})"
-SPORT_EXP = "CET ([^:]+):"
-DESC_EXP = "CET {sport}: (.*)/{join_channels}"
-
-HAS_SOPCAST = False
-HAS_ACESTREAM = False
-
 class Item(object):
     def __init__(self, data):
-        self.time, self.sport, self.match, self.category, self.channels = data        
-        self.soplinks = []
-    
+        self.time, self.sport, self.match, self.category, self.channels = data
+        self.links = []
+
     def __str__(self):
-        return str((self.time, self.sport, self.match, self.category, self.channels, self.soplinks))
+        return str((self.time, self.sport, self.match, self.category, self.channels, self.links))
 
     def gettime(self):
         return self.time.strftime(DATEFORMAT)
@@ -72,45 +69,42 @@ def clean_page(content):
 
 
 def parse_schedule_row_node(row):
-    try:        
+    try:
         rdate, rtime, rsport, rcat, rmatch, channels = map(lambda x: x.text.strip(), row)
+
         if rdate and rtime:
             time = datetime.strptime(rdate + " " + rtime.replace(" CET", ""), DATEFORMAT)
-            
-            available_channels = re.findall("(S?[0-9]+)", channels)
 
-            if not HAS_SOPCAST:
-                available_channels = [x for x in available_channels if "S" not in x]
-
-            if not HAS_ACESTREAM:
-                available_channels = [x for x in available_channels if not x.isdigit()]
+            channels = re.findall("([0-9]+)", channels)
             
-            if available_channels:
-                return time, rsport, rmatch, rcat, sorted(available_channels)
+            if channels:
+                return time, rsport, rmatch, rcat, sorted(channels)
     except Exception as e:
         print e
     return None
 
 
 def get_schedule():
-    page = get_page(BASE_URL + "agenda")
+    page = get_page(BASE_URL + SCHEDULE_ENDPOINT)
     tree = html.fromstring(clean_page(page))
     items = []
     for match in tree.xpath('//table//tr[td/@class="auto-style3"]'):
         data = parse_schedule_row_node(match)
         if data:
             item = Item(data)
-            items.append(item)    
+            items.append(item)
+
     return items
 
 
-def crawl_sopcast_links(item):
+def crawl_stream_links(item):
     for chan in item.channels:
         page = get_page(BASE_URL + "av" + chan.lower())
         tree = html.fromstring(page)
-        link = tree.xpath("//a[contains(@href, 'sop://')]/@href")
+
+        link = tree.xpath("//a[contains(@href, 'acestream://')]/@href")
         if link:
-            item.soplinks.append(link[0])
+            item.links.append(link[0])
 
 
 def clear_screen():
@@ -123,14 +117,33 @@ def print_buffering(value):
 
 def show_match_options(match):
 
-    choose = "Choose a sopcast channel to start streaming"
+    choose = "Choose an acestream channel to start streaming"
 
-    option = option_chooser(header=match.header(), choose=choose, options=[[link,] for link in match.soplinks])
+    option = option_chooser(header=match.header(), choose=choose, options=[[link,] for link in match.links])
 
-    start_streaming(match.soplinks[option])
+    start_streaming(match.links[option])
+
+
+def start_process(command):
+    return subprocess.Popen(command, stdout=open(os.devnull, 'w'), stderr=subprocess.STDOUT)
+
+
+def start_streaming(link):
+    engine = start_process([ACESTREAMENGINE, "--client-console"])
+    player = start_process([ACESTREAMPLAYER, link])  # -f for fullscreen when stream starts
+
+    print "Started acestream engine."
+    print "Starting acestream player. To stop, close vlc window or press ctrl+c here"
+    # wait until the user closes the vlc window
+    try:
+        player.communicate()
+    except KeyboardInterrupt as e:
+        player.terminate()
+    finally:
+        engine.terminate()
+
     
-
-def start_streaming(soplink):
+def start_streaming_obs(soplink):
     print "Start streaming channel: " + soplink
 
     vlcrunning = False
@@ -141,10 +154,10 @@ def start_streaming(soplink):
         vlccmd = ["cvlc", "http://localhost:" + SOP_PORT + "/tv.asf"]
 
         sopprocess = subprocess.Popen(sopcmd, stdout=subprocess.PIPE)
-        
+
         print "Wating for stream to buffer"
         print_buffering(0)
-        
+
         while True:
             line = sopprocess.stdout.readline()
             if "nblockAvailable" in line:
@@ -162,7 +175,7 @@ def start_streaming(soplink):
 
 
 def main(args):
-    print "Requesting schedules from {0}".format(BASE_URL + "agenda")
+    print "Requesting schedules from {0}".format(BASE_URL + SCHEDULE_ENDPOINT)
     items = get_schedule()
 
     # we want to filter matches already finished (past) or too late to start streaming (future)
@@ -204,7 +217,7 @@ def main(args):
             else:
                 items = filtered
 
-    crawl_sopcast_links(match)
+    crawl_stream_links(match)
     show_match_options(match)
     return 0
 
@@ -221,17 +234,18 @@ def get_indexed_options(items, start=0):
 
 
 def parse_arguments(args):
-    parser = argparse.ArgumentParser(description='Searchs for sports events in http://arenavision.in and starts a sopcast stream')
+    parser = argparse.ArgumentParser(description='Searchs for sports events in http://arenavision.in and starts acestream engine and player to view stream')
     parser.add_argument('filter', nargs='*', help='Word to start filtering the results')
     return parser.parse_args(args)
 
 
 def startup():
-    # TODO: check if vlc is available
-    # TODO: check if sp-sc-auth or acestreamengine or both are available
-    global HAS_SOPCAST, HAS_ACESTREAM
-    HAS_SOPCAST = True
-    HAS_ACESTREAM = False
+    # check if acestream-engine and acestream-player are available
+    if not os.path.isfile(ACESTREAMENGINE) or not os.path.isfile(ACESTREAMPLAYER):
+        print "Acestream binaries not found. Please make sure you have AcestreamPlayer and AcestreamEngine installed."
+        return False
+    return True
+    
 
 def option_chooser(header="", options=None, choose="Enter a number", allowfilter=False):
     """
@@ -280,9 +294,14 @@ def option_chooser(header="", options=None, choose="Enter a number", allowfilter
 
 if __name__ == "__main__":
     try:
-        startup()
+        if not startup():
+            exit(1)
+
         args = parse_arguments(sys.argv[1:])
         exit(main(args.filter))
     except KeyboardInterrupt as e:
         print "Good bye!"
 
+# TODO: check if acestreamengine and acestreamplayer are available (just look for binaries)
+# TODO: test what happens if acestreamengine or acestreamplayer are already running.
+# TODO: separate channels by language and show in channels menu
