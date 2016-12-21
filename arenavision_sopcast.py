@@ -47,7 +47,8 @@ class Item(object):
             self.gettime(),
             self.sport.decode("utf8"),
             self.category.decode("utf8"),
-            self.match.decode("utf8")
+            self.match.decode("utf8"),
+            "-".join(self.channels).decode("utf8")
         ]
 
     def matches(self, keywords):
@@ -68,17 +69,29 @@ def clean_page(content):
     return content.replace("<br />", "").replace("<br>", "").replace("\t", "").replace("\n", " ")
 
 
+def parse_channels(chstr):
+    # parses a string like: "5-6 [SPA] 26-27 [ENG]" into a dict like {lang: [ch1, ch2]}
+    chlist = {}
+    tmp = []
+    for ch in re.findall("([A-Z0-9]+)", chstr):
+        if ch.isdigit():
+            tmp.append(ch)
+        else:                 
+            chlist[ch] = list(tmp)
+            tmp = []
+    return chlist
+
+
 def parse_schedule_row_node(row):
     try:
         rdate, rtime, rsport, rcat, rmatch, channels = map(lambda x: x.text.strip(), row)
 
         if rdate and rtime:
             time = datetime.strptime(rdate + " " + rtime.replace(" CET", ""), DATEFORMAT)
-
-            channels = re.findall("([0-9]+)", channels)
             
-            if channels:
-                return time, rsport, rmatch, rcat, sorted(channels)
+            chlist = parse_channels(channels)    
+            if chlist:
+                return time, rsport, rmatch, rcat, chlist
     except Exception as e:
         print e
     return None
@@ -98,13 +111,14 @@ def get_schedule():
 
 
 def crawl_stream_links(item):
-    for chan in item.channels:
-        page = get_page(BASE_URL + "av" + chan.lower())
-        tree = html.fromstring(page)
+    for lang, channels in item.channels.items():
+        for chan in channels:
+            page = get_page(BASE_URL + "av" + chan.lower())
+            tree = html.fromstring(page)
 
-        link = tree.xpath("//a[contains(@href, 'acestream://')]/@href")
-        if link:
-            item.links.append(link[0])
+            link = tree.xpath("//a[contains(@href, 'acestream://')]/@href")
+            if link:
+                item.links.append([link[0], lang])
 
 
 def clear_screen():
@@ -119,9 +133,17 @@ def show_match_options(match):
 
     choose = "Choose an acestream channel to start streaming"
 
-    option = option_chooser(header=match.header(), choose=choose, options=[[link,] for link in match.links])
-
-    start_streaming(match.links[option])
+    option = option_chooser(header=match.header(), choose=choose, options=match.links)
+    
+    start_streaming(match.links[option][0])
+    # TODO: find a cool way for this selector
+    option = raw_input("Type 0 to start over, 1 to choose another channel, or anything else to exit: ")
+    if option == "1":
+        show_match_options(match)
+    elif option == "0":
+        main([])
+    else:
+        print "Good bye!"
 
 
 def start_process(command):
@@ -141,37 +163,6 @@ def start_streaming(link):
         player.terminate()
     finally:
         engine.terminate()
-
-    
-def start_streaming_obs(soplink):
-    print "Start streaming channel: " + soplink
-
-    vlcrunning = False
-    sopprocess = None
-
-    try:
-        sopcmd = ["sp-sc-auth", soplink, "3908", SOP_PORT]
-        vlccmd = ["cvlc", "http://localhost:" + SOP_PORT + "/tv.asf"]
-
-        sopprocess = subprocess.Popen(sopcmd, stdout=subprocess.PIPE)
-
-        print "Wating for stream to buffer"
-        print_buffering(0)
-
-        while True:
-            line = sopprocess.stdout.readline()
-            if "nblockAvailable" in line:
-                buff = line.split("nblockAvailable=")[-1]
-                print_buffering(buff.strip())
-                if not vlcrunning and int(buff) > 30:
-                    subprocess.Popen(vlccmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                    vlcrunning = True
-        sopprocess.terminate()
-        print "Bye!"
-    except KeyboardInterrupt, e:
-        print "\nStop stream. Exit."
-        sopprocess.terminate()
-        raise
 
 
 def main(args):
@@ -205,12 +196,12 @@ def main(args):
         choose_string = "Choose a channel or type a sport to filter"
 
         items_list = [item.tolist() for item in items]
-        input = option_chooser(options=items_list, choose=choose_string, allowfilter=True)
-        if type(input) is int:
-            match = items[input]
+        option = option_chooser(options=items_list, choose=choose_string, allowfilter=True)
+        if type(option) is int:
+            match = items[option]
         else:
             # this is a keyword to filter
-            filtered = [item for item in items if item.matches((input.lower(),))]
+            filtered = [item for item in items if item.matches((option.lower(),))]
             if not filtered:
                 print "No results to show, please check your filter"
                 sleep(2)
@@ -245,14 +236,14 @@ def startup():
         print "Acestream binaries not found. Please make sure you have AcestreamPlayer and AcestreamEngine installed."
         return False
     return True
-    
+
 
 def option_chooser(header="", options=None, choose="Enter a number", allowfilter=False):
     """
     asks for a user input (index) based on a list. 0 for exit.
     Returns a options item index or a filter string if enabled
     """
-    input = None
+    option = None
 
     if not options:
         print "No possible options to show."
@@ -261,35 +252,35 @@ def option_chooser(header="", options=None, choose="Enter a number", allowfilter
     # appends the index to the first element of each option
     options = get_indexed_options(options, start=1)
 
-    while not input:
+    while not option:
         clear_screen()
         if header:
             print header
 
         print tabulate(options)
 
-        input = raw_input(choose + " (0 to exit): ")
+        option = raw_input(choose + " (0 to exit): ")
         # TODO: externalise logic
-        if not input.isdigit():
+        if not option.isdigit():
             if allowfilter:
-                return input
+                return option
             else:
                 print "Type a valid item index: "
-                input = None
+                option = None
                 sleep(3)
         else:
-            if input == "0":
+            if option == "0":
                 raise KeyboardInterrupt()
 
             try:
-                _ = options[int(input) - 1]  # enumerate starts in 1
+                _ = options[int(option) - 1]  # enumerate starts in 1
                 # as its a valid index, let's return it:
-                return int(input) - 1
+                return int(option) - 1
             except IndexError as ie:
                 print "Type a valid index channel"
-                input = None
+                option = None
                 sleep(2)
-    return input
+    return option
 
 
 if __name__ == "__main__":
